@@ -48,21 +48,36 @@ class ElasticsearchExtractor(BaseExtractor, variant='elasticsearch'):
             write_mode = 'overwrite'
 
         scroll_size = table.fetchsize or 10000
+        total_slices = table.partitions_count if table.partitions_count > 1 else 1
         results = []
-        resp = es.search(index=index, query=query, scroll='5m', size=scroll_size)
-        scroll_id = resp['_scroll_id']
-        hits = resp['hits']['hits']
 
-        while hits:
-            for hit in hits:
-                doc = hit['_source']
-                doc['_id'] = hit['_id']
-                results.append(doc)
-            resp = es.scroll(scroll_id=scroll_id, scroll='5m')
-            scroll_id = resp['_scroll_id']
-            hits = resp['hits']['hits']
+        def scroll_slice(slice_id: int, total: int) -> list:
+            slice_results = []
+            search_kwargs = {'index': index, 'query': query, 'scroll': '5m', 'size': scroll_size}
+            if total > 1:
+                search_kwargs['slice'] = {'id': slice_id, 'max': total}
+            r = es.search(**search_kwargs)
+            sid = r['_scroll_id']
+            h = r['hits']['hits']
+            while h:
+                for hit in h:
+                    doc = hit['_source']
+                    doc['_id'] = hit['_id']
+                    slice_results.append(doc)
+                r = es.scroll(scroll_id=sid, scroll='5m')
+                sid = r['_scroll_id']
+                h = r['hits']['hits']
+            es.clear_scroll(scroll_id=sid)
+            return slice_results
 
-        es.clear_scroll(scroll_id=scroll_id)
+        if total_slices > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=total_slices) as executor:
+                futures = [executor.submit(scroll_slice, s, total_slices) for s in range(total_slices)]
+                for future in as_completed(futures):
+                    results.extend(future.result())
+        else:
+            results = scroll_slice(0, 1)
 
         if not results:
             logger.info({'table': table.target_name, 'status': 'extracted', 'rows': 0})
