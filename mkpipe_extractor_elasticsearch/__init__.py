@@ -40,8 +40,17 @@ class ElasticsearchExtractor(BaseExtractor, variant='elasticsearch'):
 
         index = table.name
         query = {'match_all': {}}
+        has_static_bounds = table.filter_lower_bound is not None or table.filter_upper_bound is not None
 
-        if table.replication_method.value == 'incremental' and last_point and table.iterate_column:
+        if table.replication_method.value == 'incremental' and table.iterate_column and has_static_bounds:
+            range_cond = {}
+            if table.filter_lower_bound is not None:
+                range_cond['gte'] = table.filter_lower_bound
+            if table.filter_upper_bound is not None:
+                range_cond['lt'] = table.filter_upper_bound
+            query = {'range': {table.iterate_column: range_cond}}
+            write_mode = 'overwrite'
+        elif table.replication_method.value == 'incremental' and last_point and table.iterate_column:
             query = {'range': {table.iterate_column: {'gt': last_point}}}
             write_mode = 'append'
         else:
